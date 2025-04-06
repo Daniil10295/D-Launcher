@@ -9,7 +9,7 @@
 body
     background-image: url('../images/background.png')
     margin: 0
-
+    overflow: hidden
 main
     height: calc(100vh - 40px)
 
@@ -19,6 +19,11 @@ main
     box-sizing: border-box
     user-select: none
     color: #fff
+    img
+        pointer-events: none
+
+h5
+    color: #999999
 
 button
     background-color: transparent
@@ -48,3 +53,4 @@ button
 
 [disabled]
     opacity: 0.75
+    pointer-events: none

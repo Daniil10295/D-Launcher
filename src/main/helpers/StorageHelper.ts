@@ -1,21 +1,25 @@
 import { existsSync, mkdirSync } from 'fs';
+import { cp, rename, rm } from 'fs/promises';
 import { homedir } from 'os';
 import { resolve } from 'path';
+
+import { appPath } from '@config';
 import { app } from 'electron';
+
 import { PlatformHelper } from './PlatformHelper';
 
 export class StorageHelper {
-    static storageDir: string = this.getPlatformStorageDir();
-    static assetsDir: string = resolve(StorageHelper.storageDir, 'assets');
-    static clientsDir: string = resolve(StorageHelper.storageDir, 'clients');
-    static librariesDir: string = resolve(
-        StorageHelper.storageDir,
-        'libraries',
-    );
-    static javaDir: string = resolve(StorageHelper.storageDir, 'java');
-    static logFile: string = resolve(StorageHelper.storageDir, 'Launcher.log');
+    static storageDir: string;
+    static assetsDir: string;
+    static clientsDir: string;
+    static librariesDir: string;
+    static javaDir: string;
 
-    static createMissing(): void {
+    static {
+        this.storageDir = this.getPlatformStorageDir();
+
+        this.resolveDirs();
+
         if (!existsSync(this.storageDir)) mkdirSync(this.storageDir);
         if (!existsSync(this.assetsDir)) mkdirSync(this.assetsDir);
         if (!existsSync(this.clientsDir)) mkdirSync(this.clientsDir);
@@ -23,11 +27,29 @@ export class StorageHelper {
         if (!existsSync(this.javaDir)) mkdirSync(this.javaDir);
     }
 
+    static resolveDirs() {
+        this.assetsDir = resolve(this.storageDir, 'assets');
+        this.clientsDir = resolve(this.storageDir, 'clients');
+        this.librariesDir = resolve(this.storageDir, 'libraries');
+        this.javaDir = resolve(this.storageDir, 'java');
+    }
+
     private static getPlatformStorageDir() {
         if (PlatformHelper.isMac) {
-            return resolve(app.getPath('userData'), "../", "aurora-launcher");
+            return resolve(app.getPath('userData'), '../', appPath);
         }
-        return resolve(homedir(), '.aurora-launcher');
+        return resolve(homedir(), appPath);
+    }
+
+    static async move(src: string, dest: string) {
+        try {
+            await rename(src, dest);
+        } catch (error: any) {
+            if (error.code !== 'EXDEV') {
+                throw error;
+            }
+            await cp(src, dest, { recursive: true });
+            return rm(src, { recursive: true, force: true });
+        }
     }
 }
-

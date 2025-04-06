@@ -1,101 +1,135 @@
 import { spawn } from 'child_process';
 import { delimiter, join } from 'path';
 
-import { Profile, ZipHelper } from '@aurora-launcher/core';
-import { LogHelper } from 'main/helpers/LogHelper';
-import { StorageHelper } from 'main/helpers/StorageHelper';
+import {
+    Profile,
+    ProfileLibrary,
+    Server,
+    ZipHelper,
+} from '@aurora-launcher/core';
+import { api as apiConfig } from '@config';
+import { Service } from '@freshgum/typedi';
+import { app } from 'electron';
 import { coerce, gte, lte } from 'semver';
-import { Service } from 'typedi';
 
+import { Session } from '../../common/types';
+import { LauncherWindow } from '../../main/core/LauncherWindow';
+import { LogHelper } from '../../main/helpers/LogHelper';
+import { SettingsHelper } from '../../main/helpers/SettingsHelper';
+import { StorageHelper } from '../../main/helpers/StorageHelper';
 import { AuthorizationService } from '../api/AuthorizationService';
-import { LibrariesMatcher } from './LibrariesMatcher';
+import { PlatformHelper } from '../helpers/PlatformHelper';
+import { AuthlibInjector } from './AuthlibInjector';
 import { GameWindow } from './GameWindow';
 import { JavaManager } from './JavaManager';
-import { AuthlibInjector } from './AuthlibInjector';
+import { Watcher } from './Watcher';
 
-import { api as apiConfig } from '@config';
-import { PlatformHelper } from '../helpers/PlatformHelper';
-import { Session } from '../../common/types';
-
-@Service()
+@Service([
+    LauncherWindow,
+    AuthorizationService,
+    GameWindow,
+    JavaManager,
+    AuthlibInjector,
+])
 export class Starter {
+    #clientDir!: string;
+    #nativesDirectory!: string;
+
     constructor(
+        private LauncherWindow: LauncherWindow,
         private authorizationService: AuthorizationService,
         private gameWindow: GameWindow,
         private javaManager: JavaManager,
         private authlibInjector: AuthlibInjector,
     ) {}
 
-    async start(clientArgs: Profile): Promise<void> {
-        const clientDir = join(StorageHelper.clientsDir, clientArgs.clientDir);
+    async prestart(profile: Profile) {
+        this.#clientDir = join(StorageHelper.clientsDir, profile.clientDir);
+        this.#nativesDirectory = join(this.#clientDir, 'natives');
 
-        const clientVersion = coerce(clientArgs.version);
-        if (clientVersion === null) {
-            throw new Error('Invalig client version');
-        }
+        await this.authlibInjector.verify();
+
+        await this.javaManager.checkAndDownloadJava(
+            profile.javaVersion,
+            this.gameWindow,
+        );
+
+        const nativesFiles = this.prepareNatives(
+            this.#nativesDirectory,
+            profile.libraries,
+        );
+        // TODO: add support legacy assets
+
+        return { nativesFiles };
+    }
+
+    async start(
+        profile: Profile,
+        libraries: ProfileLibrary[],
+        server: Server,
+        watcher: Watcher,
+    ) {
+        const settings = SettingsHelper.getAllFields();
+
+        const clientVersion = coerce(profile.version);
+        if (clientVersion === null) throw new Error('Invalig client version');
 
         const userArgs = this.authorizationService.getCurrentSession();
-        if (!userArgs) {
-            throw new Error('Auth requierd');
-        }
+        if (!userArgs) throw new Error('Auth requierd');
 
         const gameArgs: string[] = [];
 
-        gameArgs.push('--version', clientArgs.version);
-        gameArgs.push('--gameDir', clientDir);
+        gameArgs.push('--version', profile.version);
+        gameArgs.push('--gameDir', this.#clientDir);
         gameArgs.push('--assetsDir', StorageHelper.assetsDir);
-
-        // TODO: add support legacy assets
 
         if (gte(clientVersion, '1.6.0')) {
             this.gameLauncher(
                 gameArgs,
-                clientArgs,
+                profile,
                 clientVersion.version,
                 userArgs,
+                server,
             );
         } else {
             gameArgs.push(userArgs.username);
             gameArgs.push(userArgs.accessToken);
         }
 
-        const classPath = clientArgs.libraries
-            .filter(
-                (library) =>
-                    library.type === 'library' &&
-                    LibrariesMatcher.match(library.rules),
-            )
-            .map(({ path }) => {
-                return join(StorageHelper.librariesDir, path);
-            });
-        classPath.push(join(clientDir, clientArgs.gameJar));
+        const classPath = libraries
+            .filter((lib) => lib.type === 'library' && !lib.ignoreClassPath)
+            .map(({ path }) => join(StorageHelper.librariesDir, path));
+        classPath.push(join(this.#clientDir, profile.gameJar));
 
         const jvmArgs = [];
 
-        await this.authlibInjector.verify();
         jvmArgs.push(
-            `-javaagent:${this.authlibInjector.authlibFilePath}=${apiConfig.web}`,
+            `-javaagent:${this.authlibInjector.authlibFilePath}=${this.authorizationService.getAPIEndpoint() || apiConfig.web}`,
         );
+        jvmArgs.push(`-Xmx` + settings.memory + `M`);
 
-        const nativesDirectory = this.prepareNatives(clientArgs);
-        jvmArgs.push(`-Djava.library.path=${nativesDirectory}`);
+        jvmArgs.push(`-Djava.library.path=${this.#nativesDirectory}`);
 
         if (gte(clientVersion, '1.20.0')) {
             jvmArgs.push(
-                `-Djna.tmpdir=${nativesDirectory}`,
-                `-Dorg.lwjgl.system.SharedLibraryExtractPath=${nativesDirectory}`,
-                `-Dio.netty.native.workdir=${nativesDirectory}`,
+                `-Djna.tmpdir=${this.#nativesDirectory}`,
+                `-Dorg.lwjgl.system.SharedLibraryExtractPath=${this.#nativesDirectory}`,
+                `-Dio.netty.native.workdir=${this.#nativesDirectory}`,
             );
         }
 
         jvmArgs.push(
-            ...clientArgs.jvmArgs.map((arg) =>
+            ...profile.jvmArgs.map((arg) =>
                 arg
                     .replaceAll(
                         '${library_directory}',
                         StorageHelper.librariesDir,
                     )
-                    .replaceAll('${classpath_separator}', delimiter),
+                    .replaceAll('${classpath_separator}', delimiter)
+                    .replaceAll(
+                        '${version_name}',
+                        profile.gameJar.replace('.jar', ''),
+                    ),
             ),
         );
 
@@ -104,47 +138,78 @@ export class Starter {
         }
 
         jvmArgs.push('-cp', classPath.join(delimiter));
-        jvmArgs.push(clientArgs.mainClass);
+        jvmArgs.push(profile.mainClass);
 
         jvmArgs.push(...gameArgs);
-        jvmArgs.push(...clientArgs.clientArgs);
+        jvmArgs.push(...profile.clientArgs);
 
-        await this.javaManager.checkAndDownloadJava(clientArgs.javaVersion);
-
-        const gameProccess = spawn(
-            await this.javaManager.getJavaPath(clientArgs.javaVersion),
+        const gameProcess = spawn(
+            await this.javaManager.getJavaPath(profile.javaVersion),
             jvmArgs,
-            { cwd: clientDir },
+            { cwd: this.#clientDir },
         );
 
-        gameProccess.stdout.on('data', (data: Buffer) => {
+        gameProcess.on('spawn', () => {
+            this.LauncherWindow.hideWindow();
+        });
+
+        gameProcess.stdout.on('data', (data: Buffer) => {
             const log = data.toString().trim();
             this.gameWindow.sendToConsole(log);
             LogHelper.info(log);
         });
 
-        gameProccess.stderr.on('data', (data: Buffer) => {
+        gameProcess.stderr.on('data', (data: Buffer) => {
             const log = data.toString().trim();
             this.gameWindow.sendToConsole(log);
             LogHelper.error(log);
         });
 
-        gameProccess.on('close', () => {
+        gameProcess.on('close', () => {
             this.gameWindow.stopGame();
+            watcher.stop();
             LogHelper.info('Game stop');
+            this.LauncherWindow.showWindow();
         });
+
+        return { gameProcess };
     }
     private gameLauncher(
         gameArgs: string[],
         clientArgs: Profile,
         clientVersion: string,
         userArgs: Session,
+        server: Server,
     ): void {
+        const settings = SettingsHelper.getAllFields();
         gameArgs.push('--username', userArgs.username);
 
         if (gte(clientVersion, '1.7.2')) {
             gameArgs.push('--uuid', userArgs.userUUID);
             gameArgs.push('--accessToken', userArgs.accessToken);
+            if (settings.fullScreen) gameArgs.push('--fullscreen', 'true');
+
+            if (settings.autoConnect) {
+                if (gte(clientVersion, '1.20.0')) {
+                    if ('hostname' in server)
+                        gameArgs.push(
+                            '--quickPlayMultiplayer',
+                            server.hostname,
+                        );
+                    else
+                        gameArgs.push(
+                            '--quickPlayMultiplayer',
+                            `${server.ip}:${server.port}`,
+                        );
+                } else {
+                    if ('hostname' in server)
+                        gameArgs.push('--server', server.hostname);
+                    else {
+                        gameArgs.push('--server', server.ip);
+                        gameArgs.push('--port', server.port.toString());
+                    }
+                }
+            }
 
             if (gte(clientVersion, '1.7.3')) {
                 gameArgs.push('--assetIndex', clientArgs.assetIndex);
@@ -159,38 +224,36 @@ export class Starter {
             }
 
             if (gte(clientVersion, '1.9.0')) {
-                gameArgs.push('--versionType', 'AuroraLauncher v0.0.9');
+                // TODO get launcher name from config
+                gameArgs.push(
+                    '--versionType',
+                    `AuroraLauncher v${app.getVersion()}`,
+                );
             }
         } else {
             gameArgs.push('--session', userArgs.accessToken);
         }
     }
 
-    prepareNatives(clientArgs: Profile) {
-        const nativesDir = join(
-            StorageHelper.clientsDir,
-            clientArgs.clientDir,
-            'natives',
-        );
+    prepareNatives(nativesDir: string, libraries: ProfileLibrary[]) {
+        const nativesFiles: { path: string; sha1: string }[] = [];
 
-        clientArgs.libraries
-            .filter(
-                (library) =>
-                    library.type === 'native' &&
-                    LibrariesMatcher.match(library.rules),
-            )
-            .forEach(({ path }) => {
+        libraries
+            .filter(({ type }) => type === 'native')
+            .forEach(async ({ path }) => {
                 try {
-                    ZipHelper.unzip(
-                        join(StorageHelper.librariesDir, path),
-                        nativesDir,
-                        ['.so', '.dylib', '.jnilib', '.dll'],
+                    nativesFiles.push(
+                        ...await ZipHelper.unzip(
+                            join(StorageHelper.librariesDir, path),
+                            nativesDir,
+                            ['.so', '.dylib', '.jnilib', '.dll']
+                        ),
                     );
                 } catch (error) {
                     LogHelper.error(error);
                 }
             });
 
-        return nativesDir;
+        return nativesFiles;
     }
 }

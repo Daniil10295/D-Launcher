@@ -1,20 +1,31 @@
 import { join } from 'path';
 
 import { window as windowConfig } from '@config';
-import { BrowserWindow, app, ipcMain } from 'electron';
+import { window } from '@config';
+import { Service } from '@freshgum/typedi';
+import {
+    BrowserWindow,
+    Menu,
+    Tray,
+    app,
+    dialog,
+    ipcMain,
+    nativeImage,
+    shell,
+} from 'electron';
 import installExtension, {
     REACT_DEVELOPER_TOOLS,
 } from 'electron-extension-installer';
-import { Service } from 'typedi';
 import { autoUpdater } from 'electron-updater';
 
 import { EVENTS } from '../../common/channels';
-import logo from '../../renderer/runtime/assets/images/logo.png';
+import icon from '../../renderer/runtime/assets/images/icon.png?asset';
 import { PlatformHelper } from '../helpers/PlatformHelper';
+import { SettingsHelper } from '../helpers/SettingsHelper';
 
 const isDev = process.env.DEV === 'true' && !app.isPackaged;
 
-@Service()
+@Service([])
 export class LauncherWindow {
     private mainWindow?: BrowserWindow;
 
@@ -29,7 +40,7 @@ export class LauncherWindow {
         app.whenReady().then(() => {
             this.mainWindow = this.createMainWindow();
             if (isDev) {
-                installExtension(REACT_DEVELOPER_TOOLS, {
+                /*@__PURE__*/ installExtension(REACT_DEVELOPER_TOOLS, {
                     loadExtensionOptions: {
                         allowFileAccess: true,
                     },
@@ -56,21 +67,62 @@ export class LauncherWindow {
             if (!PlatformHelper.isMac) app.quit();
         });
 
-        // hide the main window when the minimize button is pressed
-        ipcMain.on(EVENTS.WINDOW.HIDE, () => {
-            this.mainWindow?.minimize();
+        ipcMain.on(EVENTS.WINDOW.SET_TITLE, (_, title: string) => {
+            if (this.mainWindow && title) {
+                this.mainWindow.setTitle(title);
+            }
         });
 
+        // hide the main window when the minimize button is pressed
+        ipcMain.on(EVENTS.WINDOW.HIDE, () => this.mainWindow?.minimize());
+
         // close the main window when the close button is pressed
-        ipcMain.on(EVENTS.WINDOW.CLOSE, () => {
-            this.mainWindow?.close();
+        ipcMain.on(EVENTS.WINDOW.CLOSE, () => this.mainWindow?.close());
+
+        ipcMain.on(EVENTS.WINDOW.OPEN_EXTERNAL, (_, url: string) =>
+            shell.openExternal(url),
+        );
+
+        ipcMain.on(EVENTS.WINDOW.EDIT_DIR, async () => {
+            const dirPaths = dialog.showOpenDialogSync({
+                title: 'Укажите место хранения игры',
+                properties: ['openDirectory'],
+            });
+            if (
+                dirPaths &&
+                SettingsHelper.getField('dir') != dirPaths.toString()
+            )
+                await SettingsHelper.migration(dirPaths.toString());
         });
+
+        ipcMain.on(EVENTS.WINDOW.OPEN_DIR, (_, path: string) =>
+            shell.openPath(path),
+        );
     }
 
     /**
      * Create launcher window
      */
     private createMainWindow(): BrowserWindow {
+        const iconImage = nativeImage.createFromPath(icon);
+        // creating and configuring a tray
+        const tray = new Tray(iconImage.resize({ width: 16, height: 16 }));
+        tray.setToolTip(`${window.title}`);
+        tray.setContextMenu(
+            Menu.buildFromTemplate([
+                {
+                    label: 'Показать окно',
+                    click: () => mainWindow.show(),
+                },
+                {
+                    label: 'Закрыть',
+                    click: () => mainWindow.close(),
+                },
+            ]),
+        );
+
+        tray.on('click', () => mainWindow.show());
+
         // creating and configuring a window
         const mainWindow = new BrowserWindow({
             show: false, // Use 'ready-to-show' event to show window
@@ -81,19 +133,32 @@ export class LauncherWindow {
             maximizable: windowConfig.maximizable || false,
             fullscreenable: windowConfig.fullscreenable || false,
             title: windowConfig.title || 'Aurora Launcher',
-            icon: join(__dirname, logo), // TODO Check no img (maybe use mainWindow.setIcon())
+            icon: iconImage,
             webPreferences: {
+                webSecurity: false, // disable cors check
                 preload: join(__dirname, '../preload/index.js'),
                 devTools: isDev,
             },
         });
 
+        // https://github.com/electron/electron/issues/1594#issuecomment-419741626
+        mainWindow.on('page-title-updated', (evt) => {
+            evt.preventDefault();
+        });
+
+        mainWindow.webContents.setWindowOpenHandler((data) => {
+            shell.openExternal(data.url);
+            return { action: 'deny' };
+        });
+
         // loading renderer code (runtime)
-        if (isDev) mainWindow.loadURL('http://localhost:3000');
+        if (isDev && process.env['ELECTRON_RENDERER_URL'])
+            mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL']);
         else mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
 
         mainWindow.on('closed', () => {
             this.mainWindow = undefined;
+            tray.destroy();
         });
 
         /**
@@ -110,6 +175,14 @@ export class LauncherWindow {
         });
 
         return mainWindow;
+    }
+
+    public hideWindow(): void {
+        this.mainWindow?.hide();
+    }
+
+    public showWindow(): void {
+        this.mainWindow?.show();
     }
 
     public sendEvent(channel: string, ...args: any[]): void {

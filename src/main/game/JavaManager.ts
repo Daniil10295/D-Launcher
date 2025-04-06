@@ -1,37 +1,38 @@
-import { join } from 'path';
-import { StorageHelper } from '../helpers/StorageHelper';
 import { existsSync } from 'fs';
-import { Service } from 'typedi';
-import { HttpHelper, ZipHelper } from '@aurora-launcher/core';
-import tar from 'tar';
-import { mkdir, readdir } from 'fs/promises';
+import { chmod, readdir, rm } from 'fs/promises';
+import { join } from 'path';
+
+import { HashHelper, HttpHelper, ZipHelper } from '@aurora-launcher/core';
+import { Service } from '@freshgum/typedi';
+
 import { Architecture, Platform } from '../core/System';
 import { PlatformHelper } from '../helpers/PlatformHelper';
+import { StorageHelper } from '../helpers/StorageHelper';
 import { GameWindow } from './GameWindow';
 
-@Service()
+@Service([])
 export class JavaManager {
-    // TODO Лишнее связывание, придумать как сделать лучше
-    constructor(private gameWindow: GameWindow) {}
-
-    async checkAndDownloadJava(majorVersion: number) {
+    async checkAndDownloadJava(majorVersion: number, gameWindow: GameWindow) {
         const javaDir = this.#getJavaDir(majorVersion);
         if (existsSync(javaDir)) return true;
 
         const javaLink =
-            'https://api.adoptium.net/v3/binary/latest/{version}/ga/{os}/{arch}/jre/hotspot/normal/eclipse';
+            'https://api.azul.com/metadata/v1/zulu/packages/?java_version={version}&os={os}&arch={arch}&archive_type=zip&java_package_type=jre&javafx_bundled=false&latest=true&release_status=ga&page=1&page_size=1';
 
-        this.gameWindow.sendToConsole('Download Java');
-        const javaFile = await HttpHelper.downloadFile(
+        gameWindow.sendToConsole('Download Java');
+        const javaData = await HttpHelper.getResourceFromJson<JavaData[]>(
             javaLink
                 .replace('{version}', majorVersion.toString())
                 .replace('{os}', this.#getOs())
                 .replace('{arch}', this.#getArch()),
+        );
+        const javaFile = await HttpHelper.downloadFile(
+            javaData[0].download_url,
             null,
             {
                 saveToTempFile: true,
                 onProgress: (progress) => {
-                    this.gameWindow.sendProgress({
+                    gameWindow.sendProgress({
                         total: progress.total,
                         loaded: progress.transferred,
                         type: 'size',
@@ -39,19 +40,43 @@ export class JavaManager {
                 },
             },
         );
+        gameWindow.sendToConsole('Validate Java');
 
-        if (PlatformHelper.isWindows) {
-            ZipHelper.unzip(javaFile, javaDir);
-        } else {
-            await mkdir(javaDir, { recursive: true });
-            await tar.x({ file: javaFile, cwd: javaDir });
+        const detailsLink =
+            'https://api.azul.com/metadata/v1/zulu/packages/{guid}';
+        const detailsData = await HttpHelper.getResourceFromJson<JavaDetails>(
+            detailsLink.replace('{guid}', javaData[0].package_uuid),
+        );
+
+        if (
+            !HashHelper.compareFileHash(javaFile, 'md5', detailsData.md5_hash)
+        ) {
+            rm(javaFile);
+            rm(javaDir);
+            throw new Error('Java validation failed');
+        }
+
+        gameWindow.sendToConsole('Unpacking Java');
+        const extractFile = await ZipHelper.unzip(javaFile, javaDir);
+        // Проверка хешей в архиве и на диске (проверить её надобность)
+        for (const file of extractFile) {
+            if (
+                !HashHelper.compareFileHash(join(javaDir, file.path), 'sha1', file.sha1)
+            ) {
+                rm(javaFile);
+                rm(javaDir);
+                throw new Error('Java validation failed');
+            }
+        }
+        if (PlatformHelper.isLinux || PlatformHelper.isMac) {
+            await chmod(await this.getJavaPath(majorVersion), 744);
         }
     }
 
     async getJavaPath(majorVersion: number) {
         const path = ['bin', 'java'];
         if (PlatformHelper.isMac) {
-            path.unshift('Contents', 'Home');
+            path.unshift(`zulu-${majorVersion}.jre`, 'Contents', 'Home');
         }
 
         const javaVerPath = this.#getJavaDir(majorVersion);
@@ -86,13 +111,22 @@ export class JavaManager {
 
 enum JavaOs {
     WINDOWS = 'windows',
-    MAC = 'mac',
+    MAC = 'macos',
     LINUX = 'linux',
 }
 
 enum JavaArchitecture {
-    ARM = 'arm',
+    ARM = 'aarch32',
     ARM64 = 'aarch64',
-    X32 = 'x86',
+    X32 = 'i686',
     X64 = 'x64',
+}
+
+interface JavaData {
+    package_uuid: string;
+    download_url: URL;
+}
+
+interface JavaDetails {
+    md5_hash: string;
 }

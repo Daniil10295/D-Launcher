@@ -1,11 +1,13 @@
-import { HashHelper, HttpHelper } from '@aurora-launcher/core';
 import { existsSync } from 'fs';
 import { join } from 'path';
-import { StorageHelper } from '../helpers/StorageHelper';
-import { LogHelper } from '../helpers/LogHelper';
-import { Service } from 'typedi';
 
-@Service()
+import { HashHelper, HttpHelper } from '@aurora-launcher/core';
+import { Service } from '@freshgum/typedi';
+
+import { LogHelper } from '../helpers/LogHelper';
+import { StorageHelper } from '../helpers/StorageHelper';
+
+@Service([])
 export class AuthlibInjector {
     readonly authlibFilePath = join(StorageHelper.storageDir, 'authlib.jar');
 
@@ -40,11 +42,13 @@ export class AuthlibInjector {
             return;
         }
 
-        const fileHash = await HashHelper.getHashFromFile(
-            this.authlibFilePath,
-            'sha256',
-        );
-        if (fileHash !== authlibData.checksums.sha256) {
+        if (
+            !HashHelper.compareFileHash(
+                this.authlibFilePath,
+                'sha256',
+                authlibData.checksums.sha256,
+            )
+        ) {
             LogHelper.error('Authlib checksum mismatch');
             return;
         }
@@ -54,8 +58,6 @@ export class AuthlibInjector {
 }
 
 interface AuthlibData {
-    build_number: number;
-    version: string;
     download_url: string;
     checksums: {
         sha256: string;

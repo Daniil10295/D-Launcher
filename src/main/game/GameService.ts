@@ -1,13 +1,14 @@
 import { Profile, Server } from '@aurora-launcher/core';
-import { Service } from 'typedi';
+import { Service } from '@freshgum/typedi';
 
 import { APIManager } from '../api/APIManager';
+import { GameWindow } from './GameWindow';
+import { LibrariesMatcher } from './LibrariesMatcher';
 import { Starter } from './Starter';
 import { Updater } from './Updater';
 import { Watcher } from './Watcher';
-import { GameWindow } from './GameWindow';
 
-@Service()
+@Service([APIManager, Updater, Watcher, Starter, GameWindow])
 export class GameService {
     private selectedServer?: Server;
     private selectedProfile?: Profile;
@@ -45,10 +46,33 @@ export class GameService {
             return;
         }
 
+        const libraries = profile.libraries.filter((library) =>
+            LibrariesMatcher.match(library.rules),
+        );
+
         try {
-            await this.gameUpdater.validateClient(profile);
-            await this.gameStarter.start(profile);
-            await this.gameWatcher.watch();
+            const gameFiles = await this.gameUpdater.validateClient(
+                profile,
+                libraries,
+            );
+
+            const { nativesFiles } = await this.gameStarter.prestart(profile);
+
+            await this.gameWatcher.start(
+                profile,
+                libraries,
+                nativesFiles,
+                gameFiles,
+            );
+
+            const { gameProcess } = await this.gameStarter.start(
+                profile,
+                libraries,
+                server,
+                this.gameWatcher,
+            );
+
+            this.gameWatcher.setGameProcess(gameProcess);
         } catch (error) {
             this.gameWindow.sendToConsole(`${error}`);
             this.gameWindow.stopGame();

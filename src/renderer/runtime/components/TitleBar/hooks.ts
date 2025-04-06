@@ -1,24 +1,48 @@
-import { useRecoilState, useSetRecoilState } from 'recoil';
+import { useSetAtom } from 'jotai';
+import { useResetAtom } from 'jotai/utils';
 
-import { titlebarBackBtn, titlebarTitle, titlebarUser } from './states';
+import {
+    titlebarBackBtn,
+    titlebarSettingsBtn,
+    titlebarTitle,
+    titlebarUser,
+    titlebarLogout,
+} from './states';
 
 export function useTitlebar() {
-    const [titlebarBackBtnState, setTitlebarBackBtnState] =
-        useRecoilState(titlebarBackBtn);
+    const setTitlebarBackBtnState = useSetAtom(titlebarBackBtn);
 
     function showTitlebarBackBtn() {
-        if (!titlebarBackBtnState.show) {
-            setTitlebarBackBtnState({ show: true });
-        }
+        setTitlebarBackBtnState({ show: true });
     }
 
     function hideTitlebarBackBtn() {
-        if (titlebarBackBtnState.show) {
-            setTitlebarBackBtnState({ show: false });
-        }
+        setTitlebarBackBtnState({ show: false });
     }
 
-    const setTitlebarTitleState = useSetRecoilState(titlebarTitle);
+    const setTitlebarLogoutBtnState = useSetAtom(titlebarLogout);
+
+    function showTitlebarLogoutBtn() {
+        setTitlebarLogoutBtnState({ show: true });
+    }
+
+    function hideTitlebarLogoutBtn() {
+        setTitlebarLogoutBtnState({ show: false });
+    }
+
+    const setTitlebarSettingsBtnState = useSetAtom(titlebarSettingsBtn);
+
+    function showTitlebarSettingsBtn() {
+        setTitlebarSettingsBtnState({ show: true });
+    }
+
+    function hideTitlebarSettingsBtn() {
+        setTitlebarSettingsBtnState({ show: false });
+    }
+
+    const setTitlebarTitleState = useSetAtom(titlebarTitle);
+
+    const resetTitlebarTitleState = useResetAtom(titlebarTitle);
 
     function showTitlebarTitle() {
         setTitlebarTitleState((state) => ({ ...state, show: true }));
@@ -32,28 +56,23 @@ export function useTitlebar() {
         setTitlebarTitleState((state) => ({ ...state, text }));
     }
 
-    const setTitlebarUserState = useSetRecoilState(titlebarUser);
-
-    function showTitlebarUser() {
-        setTitlebarUserState((state) => ({ ...state, show: true }));
+    function resetTitlebarTitleText() {
+        resetTitlebarTitleState();
     }
 
-    function hideTitlebarUser() {
-        setTitlebarUserState((state) => ({ ...state, show: false }));
-    }
-
-    function setTitlebarUserText(username: string) {
-        setTitlebarUserState((state) => ({ ...state, username }));
-    }
+    const setTitlebarUserText = useSetAtom(titlebarUser);
 
     return {
         showTitlebarBackBtn,
         hideTitlebarBackBtn,
+        showTitlebarLogoutBtn,
+        hideTitlebarLogoutBtn,
+        showTitlebarSettingsBtn,
+        hideTitlebarSettingsBtn,
         showTitlebarTitle,
         hideTitlebarTitle,
         setTitlebarTitleText,
-        showTitlebarUser,
-        hideTitlebarUser,
+        resetTitlebarTitleText,
         setTitlebarUserText,
     };
 }

@@ -1,39 +1,46 @@
-import { mkdirSync } from 'fs';
-import { writeFile } from 'fs/promises';
-import { dirname, join } from 'path';
+import { existsSync, mkdirSync, readdirSync } from 'fs';
+import { rm, writeFile } from 'fs/promises';
+import { dirname, extname, join } from 'path';
 
 import {
     HashHelper,
+    HashedFile,
     HttpHelper,
     JsonHelper,
+    MojangAssets,
     Profile,
+    ProfileLibrary,
 } from '@aurora-launcher/core';
 import { api as apiConfig } from '@config';
-import { StorageHelper } from 'main/helpers/StorageHelper';
+import { Service } from '@freshgum/typedi';
 import pMap from 'p-map';
-import { Service } from 'typedi';
 
+import { LoadProgress } from '../../common/types';
+import { StorageHelper } from '../../main/helpers/StorageHelper';
 import { APIManager } from '../api/APIManager';
+import { retry } from '../utils/retry';
 import { GameWindow } from './GameWindow';
-import { LibrariesMatcher } from './LibrariesMatcher';
 
-@Service()
+@Service([APIManager, GameWindow])
 export class Updater {
     constructor(
         private api: APIManager,
         private gameWindow: GameWindow,
     ) {}
 
-    async validateClient(clientArgs: Profile): Promise<void> {
-        await this.validateAssets(clientArgs);
-        await this.validateLibraries(clientArgs);
-        await this.validateGameFiles(clientArgs);
+    async validateClient(
+        clientArgs: Profile,
+        libraries: ProfileLibrary[],
+    ): Promise<HashedFile[]> {
+        await this.validateAssets(clientArgs.assetIndex);
+        await this.validateLibraries(libraries);
+        return await this.validateGameFiles(clientArgs);
     }
 
-    async validateAssets(clientArgs: Profile): Promise<void> {
+    async validateAssets(assetIndex: string): Promise<void> {
         this.gameWindow.sendToConsole('Load assets files');
 
-        const assetIndexPath = `indexes/${clientArgs.assetIndex}.json`;
+        const assetIndexPath = `indexes/${assetIndex}.json`;
         const filePath = join(StorageHelper.assetsDir, assetIndexPath);
         mkdirSync(dirname(filePath), { recursive: true });
 
@@ -41,7 +48,7 @@ export class Updater {
         const assetFile = await HttpHelper.getResource(assetIndexUrl);
         await writeFile(filePath, assetFile);
 
-        const { objects } = JsonHelper.fromJson<Assets>(assetFile);
+        const { objects } = JsonHelper.fromJson<MojangAssets>(assetFile);
 
         const assetsHashes = Object.values(objects)
             .sort((a, b) => b.size - a.size)
@@ -50,43 +57,45 @@ export class Updater {
                 path: `objects/${hash.hash.slice(0, 2)}/${hash.hash}`,
             }));
 
-        const totalSize = assetsHashes.reduce(
-            (prev, cur) => prev + cur.size,
-            0,
-        );
-        let loaded = 0;
+        const total = assetsHashes.reduce((prev, cur) => prev + cur.size, 0);
+        const updateProgress = this.createProgressUpdater(total, 'size');
 
-        await pMap(
-            assetsHashes,
-            async (hash) => {
-                await this.validateAndDownloadFile(
-                    hash.path,
-                    hash.hash,
-                    StorageHelper.assetsDir,
-                    'assets',
-                );
+        try {
+            await pMap(
+                assetsHashes,
+                async (hash) => {
+                    await retry(
+                        () =>
+                            this.checkAndDownloadFile(
+                                hash.path,
+                                StorageHelper.assetsDir,
+                                'assets',
+                            ),
+                        3,
+                        1000,
+                    );
 
-                this.gameWindow.sendProgress({
-                    total: totalSize,
-                    loaded: (loaded += hash.size),
-                    type: 'size',
-                });
-            },
-            { concurrency: 4 },
-        );
+                    updateProgress(hash.size);
+                },
+                { concurrency: 4 },
+            );
+        } catch (error) {
+            throw new Error(`p-map error ${error}`);
+        }
+
+        this.gameWindow.sendToConsole('Assets files loaded');
     }
 
-    async validateLibraries(clientArgs: Profile): Promise<void> {
+    async validateLibraries(libraries: ProfileLibrary[]): Promise<void> {
         this.gameWindow.sendToConsole('Load libraries files');
 
-        const usedLibraries = clientArgs.libraries.filter((library) =>
-            LibrariesMatcher.match(library.rules),
+        const updateProgress = this.createProgressUpdater(
+            libraries.length,
+            'count',
         );
 
-        let loaded = 0;
-
         await pMap(
-            usedLibraries,
+            libraries,
             async (library) => {
                 await this.validateAndDownloadFile(
                     library.path,
@@ -95,108 +104,161 @@ export class Updater {
                     'libraries',
                 );
 
-                this.gameWindow.sendProgress({
-                    total: usedLibraries.length,
-                    loaded: (loaded += 1),
-                    type: 'count',
-                });
+                updateProgress();
             },
             { concurrency: 4 },
         );
+
+        this.gameWindow.sendToConsole('Libraries files loaded');
     }
 
-    async validateGameFiles(clientArgs: Profile): Promise<void> {
+    async validateGameFiles(clientArgs: Profile): Promise<HashedFile[]> {
         this.gameWindow.sendToConsole('Load client files');
 
         const hashes = await this.api.getUpdates(clientArgs.clientDir);
-        if (!hashes) {
-            throw new Error('Client not found');
-        }
+        if (!hashes) throw new Error('Client not found');
 
-        hashes.sort(
-            (a: { size: number }, b: { size: number }) => b.size - a.size,
+        hashes.sort((a, b) => b.size - a.size);
+        const total = hashes.reduce((prev, cur) => prev + cur.size, 0);
+        const updateProgress = this.createProgressUpdater(total, 'size');
+
+        const verifyArray = clientArgs.update.concat(clientArgs.updateVerify);
+        const verifyDirs = verifyArray.filter(
+            (path) => extname(path)[0] !== '.',
         );
-        const totalSize = hashes.reduce(
-            (prev: any, cur: { size: any }) => prev + cur.size,
-            0,
-        );
-        let loaded = 0;
+        const verifyFiles: string[] = [];
 
         await pMap(
             hashes,
-            async (hash: any) => {
-                await this.validateAndDownloadFile(
+            async (hash) => {
+                await this.checkAndDownloadFile(
                     hash.path,
-                    hash.sha1,
                     StorageHelper.clientsDir,
                     'clients',
                 );
 
-                this.gameWindow.sendProgress({
-                    total: totalSize,
-                    loaded: (loaded += hash.size),
-                    type: 'size',
-                });
+                const filteredPath = hash.path
+                    .replace(/\\/g, '/')
+                    .replace(`/${clientArgs.clientDir}/`, '');
+
+                if (
+                    verifyArray.find((u) => filteredPath.startsWith(u)) &&
+                    !clientArgs.updateExclusions.find((u) =>
+                        filteredPath.startsWith(u),
+                    )
+                ) {
+                    verifyFiles.push(filteredPath);
+                    await this.validateAndDownloadFile(
+                        hash.path,
+                        hash.sha1,
+                        StorageHelper.clientsDir,
+                        'clients',
+                    );
+                }
+
+                updateProgress(hash.size);
             },
             { concurrency: 4 },
         );
+
+        if (verifyDirs.length > 0) {
+            for (const verifyDir of verifyDirs) {
+                const verifyDirPath = join(
+                    StorageHelper.clientsDir,
+                    clientArgs.clientDir,
+                    verifyDir,
+                );
+
+                const filesList = readdirSync(verifyDirPath, {
+                    withFileTypes: true,
+                    recursive: true,
+                })
+                    .filter((entry) => entry.isFile())
+                    .map((entry) =>
+                        join(entry.parentPath, entry.name)
+                            .replace(verifyDirPath, '')
+                            .replace(/\\/g, '/'),
+                    );
+
+                const whitelistedFiles = verifyFiles
+                    .filter((x) => x.startsWith(verifyDir))
+                    .map((x) => x.replace(verifyDir, '').replace(/\\/g, '/'));
+
+                const excludeList = clientArgs.updateExclusions
+                    .filter((x) => x.startsWith(verifyDir))
+                    .map((x) => x.replace(verifyDir, '').replace(/\\/g, '/'));
+
+                const fileRM = filesList.filter(
+                    (path) =>
+                        !whitelistedFiles.includes(path) &&
+                        !excludeList.some((ex) => path.startsWith(ex)),
+                );
+                for (const file of fileRM) {
+                    await rm(join(verifyDirPath, file));
+                }
+            }
+        }
+        this.gameWindow.sendToConsole('Client files loaded');
+        return hashes;
     }
 
     private getFileUrl(
         path: string,
         type: 'clients' | 'libraries' | 'assets',
     ): URL {
-        return new URL(
-            `files/${type}/${path.replace('\\', '/')}`,
-            apiConfig.web,
-        );
+        return new URL(join('files', type, path), apiConfig.web);
     }
 
-    async validateAndDownloadFile(
+    private async validateAndDownloadFile(
         path: string,
         sha1: string,
         rootDir: string,
         type: 'clients' | 'libraries' | 'assets',
     ): Promise<void> {
         const filePath = join(rootDir, path);
-        mkdirSync(dirname(filePath), { recursive: true });
-
         const fileUrl = this.getFileUrl(path, type);
 
         try {
-            const fileHash = await HashHelper.getHashFromFile(filePath, 'sha1');
-            if (fileHash === sha1) return;
-        } catch (error) {
+            if (await HashHelper.compareFileHash(filePath, 'sha1', sha1)) {
+                return;
+            }
+        } catch {
             // ignore not found file
         }
 
         try {
             await HttpHelper.downloadFile(fileUrl, filePath);
-        } catch (error) {
+        } catch {
             throw new Error(`file ${fileUrl} not found`);
         }
     }
-}
 
-// TODO: Move to @aurora-launcher/core
-/**
- * For assets
- */
-export interface Assets {
-    /**
-     * Найдено в https://launchermeta.mojang.com/v1/packages/3d8e55480977e32acd9844e545177e69a52f594b/pre-1.6.json \
-     * до версии 1.6 (если точнее до снапшота 13w23b)
-     */
-    map_to_resources?: boolean;
-    /**
-     * Найдено в https://launchermeta.mojang.com/v1/packages/770572e819335b6c0a053f8378ad88eda189fc14/legacy.json \
-     * начиная с версии версии 1.6 (если точнее с снапшота 13w24a) и до 1.7.2 (13w48b)
-     */
-    virtual?: boolean;
-    objects: { [key: string]: Asset };
-}
+    private async checkAndDownloadFile(
+        path: string,
+        rootDir: string,
+        type: 'clients' | 'libraries' | 'assets',
+    ): Promise<void> {
+        const filePath = join(rootDir, path);
+        const fileUrl = this.getFileUrl(path, type);
 
-export interface Asset {
-    hash: string;
-    size: number;
+        if (existsSync(filePath)) return;
+
+        try {
+            await HttpHelper.downloadSafeFile(fileUrl, filePath);
+        } catch {
+            throw new Error(`file ${fileUrl} not found`);
+        }
+    }
+
+    private createProgressUpdater(total: number, type: LoadProgress['type']) {
+        let loaded = 0;
+
+        return (size?: number) => {
+            this.gameWindow.sendProgress({
+                total,
+                loaded: (loaded += size || 1),
+                type,
+            });
+        };
+    }
 }
