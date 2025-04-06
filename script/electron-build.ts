@@ -3,7 +3,7 @@ import { api, window } from '../config'
 
 await build({
     config: {
-    appId: "ru.aurora.launcher",
+    appId: "ru.daniil10295.launcher",
     productName: window.title,
     electronLanguages: [
         "en-US"
@@ -42,6 +42,7 @@ await build({
     }
   }
   })
+    
 .then((result) => {
     console.log(JSON.stringify(result))
 })

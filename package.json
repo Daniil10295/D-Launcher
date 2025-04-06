@@ -1,6 +1,6 @@
 {
     "name": "d-launcher-app",
-    "version": "0.0.5-dev.2",
+    "version": "0.0.5-dev.4",
     "description": "Launcher for Minecraft",
     "main": "out/main/index-obf.loader.js",
     "private": true,
@@ -23,7 +23,7 @@
         "type": "git",
         "url": "git+https://github.com/AuroraTeam/Launcher.git"
     },
-    "author": "AuroraTeam",
+    "author": "D-Team",
     "contributors": [
         "JoCat (https://github.com/JoCat)"
     ],
